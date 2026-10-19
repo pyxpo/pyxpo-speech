@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "nativeContract": 4,
+  "name": "speech",
+  "native": "Speech",
+  "android": {
+    "namespace": "dev.pyxpo.modules.speech",
+    "classes": ["dev.pyxpo.modules.speech.SpeechModule"],
+    "dependencies": [],
+    "minSdk": 24,
+    "cmake": {
+      "path": "src/main/cpp/CMakeLists.txt"
+    }
+  }
+}
