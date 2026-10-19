@@ -1,9 +1,12 @@
-# libpyxpo_speech.so: whisper.cpp (and its ggml) linked in statically, behind a small JNI layer.
+# libpyxpo_speech.so: a small JNI layer over whisper.cpp and its ggml, built as shared libraries so ggml can
+# pick, on the phone, the CPU build that uses the phone's fastest instructions (dot product, fp16, int8 matmul,
+# SVE, SME). One build for generic armv8.0 is several times slower on a recent phone.
 #
 # The whisper.cpp source is a pinned release tarball, checked against its sha256 and kept in
 # ~/.cache/pyxpo (downloaded once, shared by every app and ABI). Point PYXPO_WHISPER_DIR (a CMake
 # variable or an environment variable) at a whisper.cpp checkout to build that instead, for example offline.
-# ggml symbols stay hidden, so another module's ggml (llama.cpp) can live in the same app.
+# Every library is named libpyxpo_speech_*.so, so another module's ggml (llama.cpp) can live in the same app:
+# the files do not clash in the APK, and each library finds the ggml it was linked with.
 cmake_minimum_required(VERSION 3.18)
 project(pyxpo_speech C CXX)
 
@@ -59,7 +62,18 @@ set(CMAKE_CXX_VISIBILITY_PRESET hidden)
 set(CMAKE_VISIBILITY_INLINES_HIDDEN ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+# 16 KB pages: Android 15+ devices and Google Play need it; NDK 27 links for 4 KB by default
+string(APPEND CMAKE_SHARED_LINKER_FLAGS " -Wl,-z,max-page-size=16384")
+string(APPEND CMAKE_MODULE_LINKER_FLAGS " -Wl,-z,max-page-size=16384")
+
+set(BUILD_SHARED_LIBS ON CACHE BOOL "" FORCE)
+set(GGML_BACKEND_DL ON CACHE BOOL "" FORCE)   # CPU backends are loaded at run time (speech_jni.cpp)
+# arm64 and x86_64: one CPU backend per instruction set level; other ABIs: one plain CPU backend
+if(ANDROID_ABI STREQUAL "arm64-v8a" OR ANDROID_ABI STREQUAL "x86_64")
+    set(GGML_CPU_ALL_VARIANTS ON CACHE BOOL "" FORCE)
+else()
+    set(GGML_CPU_ALL_VARIANTS OFF CACHE BOOL "" FORCE)
+endif()
 set(WHISPER_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(WHISPER_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(WHISPER_BUILD_SERVER OFF CACHE BOOL "" FORCE)
@@ -70,9 +84,25 @@ set(GGML_OPENMP OFF CACHE BOOL "" FORCE)      # ggml's own thread pool; no libom
 set(GGML_CCACHE OFF CACHE BOOL "" FORCE)
 add_subdirectory("${PYXPO_WHISPER_DIR}" whisper EXCLUDE_FROM_ALL)
 
+# ggml builds every CPU backend as a dependency of ggml; GGML_AVAILABLE_BACKENDS lists them, oldest CPU first.
+# parakeet (another speech model in whisper.cpp) is unused, but the Android Gradle plugin builds and packs
+# every shared library target, so it is renamed too.
+set(cpu_backends "")
+foreach(target ggml ggml-base whisper parakeet ${GGML_AVAILABLE_BACKENDS})
+    if(NOT TARGET ${target})   # left in the cache by an earlier configure with other options
+        continue()
+    endif()
+    string(REPLACE "-" "_" name "pyxpo_speech_${target}")
+    set_target_properties(${target} PROPERTIES OUTPUT_NAME ${name})
+    if(target MATCHES "^ggml-cpu")
+        list(PREPEND cpu_backends "lib${name}.so")
+    endif()
+endforeach()
+list(JOIN cpu_backends "," cpu_backends)
+
 add_library(pyxpo_speech SHARED speech_jni.cpp)
-target_link_libraries(pyxpo_speech PRIVATE whisper)
+target_link_libraries(pyxpo_speech PRIVATE whisper ggml)
 target_compile_features(pyxpo_speech PRIVATE cxx_std_17)
-target_compile_definitions(pyxpo_speech PRIVATE PYXPO_WHISPER_VERSION="${WHISPER_VERSION}")
-# 16 KB pages: Android 15+ devices and Google Play need it; NDK 27 links for 4 KB by default
-target_link_options(pyxpo_speech PRIVATE -Wl,--exclude-libs,ALL -Wl,--gc-sections -Wl,-z,max-page-size=16384)
+target_compile_definitions(pyxpo_speech PRIVATE PYXPO_WHISPER_VERSION="${WHISPER_VERSION}"
+                           PYXPO_CPU_BACKENDS="${cpu_backends}")
+target_link_options(pyxpo_speech PRIVATE -Wl,--gc-sections)

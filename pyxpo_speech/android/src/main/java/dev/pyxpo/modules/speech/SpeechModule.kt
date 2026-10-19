@@ -202,7 +202,8 @@ class SpeechModule : PxModule() {
             val threads = o.optInt("threads", 0).takeIf { it > 0 } ?: defaultThreads()
             val t = SystemClock.elapsedRealtime()
             val r = m.transcribe(input, language, o.optBoolean("translate", false),
-                                 o.optString("prompt", "").ifEmpty { null }, threads, o.optInt("beamSize", 0))
+                                 o.optString("prompt", "").ifEmpty { null }, threads, o.optInt("beamSize", 0),
+                                 o.optInt("audioCtx", 0))
             input.fill(0f)
             val ms = SystemClock.elapsedRealtime() - t
             if (r == null) reply(null, "cancelled")

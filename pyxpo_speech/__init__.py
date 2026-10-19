@@ -117,13 +117,16 @@ async def start_async(*, max_seconds: float = 30, levels: bool = False) -> None:
 
 
 def _options(language: str, translate: bool, prompt: Optional[str], threads: Optional[int],
-             beam_size: Optional[int]) -> Dict[str, Any]:
+             beam_size: Optional[int], audio_ctx: Union[None, int, str] = None) -> Dict[str, Any]:
     if not isinstance(language, str) or not _LANG.match(language):
         raise ValueError("language must be 'auto' or a whisper language code like 'en' or 'hi', not %r" % (language,))
     if threads is not None and not (isinstance(threads, int) and 1 <= threads <= 16):
         raise ValueError("threads must be 1 to 16")
     if beam_size is not None and not (isinstance(beam_size, int) and 1 <= beam_size <= 8):
         raise ValueError("beam_size must be 1 to 8")
+    if not (audio_ctx is None or audio_ctx == "fit"
+            or (isinstance(audio_ctx, int) and not isinstance(audio_ctx, bool) and 64 <= audio_ctx <= 1500)):
+        raise ValueError("audio_ctx must be None, 'fit' or 64 to 1500")
     o: Dict[str, Any] = {"language": language, "translate": bool(translate)}
     if prompt:
         o["prompt"] = str(prompt)
@@ -131,6 +134,8 @@ def _options(language: str, translate: bool, prompt: Optional[str], threads: Opt
         o["threads"] = threads
     if beam_size:
         o["beamSize"] = beam_size
+    if audio_ctx is not None:
+        o["audioCtx"] = -1 if audio_ctx == "fit" else audio_ctx
     return o
 
 
@@ -141,15 +146,20 @@ def _transcript(r: Dict[str, Any]) -> Dict[str, Any]:
 
 
 async def stop_async(*, language: str = "auto", translate: bool = False, prompt: Optional[str] = None,
-                     threads: Optional[int] = None, beam_size: Optional[int] = None) -> Dict[str, Any]:
+                     threads: Optional[int] = None, beam_size: Optional[int] = None,
+                     audio_ctx: Union[None, int, str] = None) -> Dict[str, Any]:
     """Stops recording and transcribes it. Returns `text`, `language` (detected, or the one given), `segments`,
     `no_speech` (0..1; high means it was likely silence), `audio_ms` and `decode_ms`.
 
     `language`: `"auto"` detects it, or a code like `"en"`/`"hi"`. `translate=True` makes whisper write English.
     `prompt` primes spelling and style (names, Hinglish words). `threads` defaults to up to 4 CPU cores,
-    `beam_size` > 1 searches more (slower, sometimes better)."""
+    `beam_size` > 1 searches more (slower, sometimes better).
+
+    `audio_ctx`: whisper encodes a 30-second window (1500 steps of 20 ms) whatever the clip's length. `"fit"`
+    encodes only as much as was recorded, which makes short clips several times faster; check its accuracy for
+    your model and languages. An int sets the window (64 to 1500)."""
     _need_native("stop_async")
-    o = _options(language, translate, prompt, threads, beam_size)
+    o = _options(language, translate, prompt, threads, beam_size, audio_ctx)
     return _transcript(await call("Speech", "stop", o, reply=True))
 
 
@@ -161,10 +171,11 @@ async def cancel_async() -> None:
 
 async def transcribe_file_async(path: PathLike, *, language: str = "auto", translate: bool = False,
                                 prompt: Optional[str] = None, threads: Optional[int] = None,
-                                beam_size: Optional[int] = None) -> Dict[str, Any]:
+                                beam_size: Optional[int] = None,
+                                audio_ctx: Union[None, int, str] = None) -> Dict[str, Any]:
     """Transcribes a WAV file (PCM 8/16/24/32-bit or 32-bit float, any rate or channel count) like `stop_async`."""
     _need_native("transcribe_file_async")
-    o = _options(language, translate, prompt, threads, beam_size)
+    o = _options(language, translate, prompt, threads, beam_size, audio_ctx)
     return _transcript(await call("Speech", "transcribeFile", os.fspath(path), o, reply=True))
 
 

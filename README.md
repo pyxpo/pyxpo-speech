@@ -23,7 +23,8 @@ if (await Speech.request_permission_async())["granted"]:
 
 - **On the phone, offline:**
   - whisper.cpp 1.9.5, built from pinned source (sha256-checked) together with your app.
-  - Runs on the CPU with the ARM NEON instructions the phone has. No GPU, no Google services.
+  - Runs on the CPU. The app carries one whisper build per CPU generation, and the phone loads the fastest one
+    its CPU can run (dot product, fp16, int8 matrix multiply). No GPU, no Google services.
   - No network permission, no downloads at run time. Your app brings the model file.
 - **Private by design:**
   - The microphone is recorded into memory at 16 kHz, never to a file.
@@ -167,7 +168,7 @@ Ways to put a model on the phone:
 - **While developing:** `adb push` it, then copy it in with `run-as` (see [Testing](#testing)).
 
 ```python
-info = await Speech.load_model_async(path)   # {"loaded": True, "model": path, "load_ms": 830, "system": "NEON = 1 | ..."}
+info = await Speech.load_model_async(path)   # {"loaded": True, "model": path, "load_ms": 830, "system": "... | BACKEND = ..."}
 await Speech.unload_model_async()             # frees the memory
 ```
 
@@ -253,6 +254,7 @@ off_level = Speech.add_level_listener(lambda level: None)      # 0..1, ten times
 | `prompt` | `None` | Text that primes spelling and style: names, product words, how to write a mixed language. |
 | `threads` | up to 4 | CPU threads, 1 to 16. |
 | `beam_size` | greedy | 1 to 8. Above 1 searches more: slower, sometimes better. |
+| `audio_ctx` | `None` (30 s) | How much audio the encoder looks at. `None` is whisper's full 30-second window. `"fit"` sizes it to the clip, and an `int` from 64 to 1500 sets it in steps of 20 ms. A smaller window is much faster but less reliable: see [How fast is it?](#faq). |
 
 Bad values raise `ValueError` before anything runs.
 
@@ -290,7 +292,7 @@ t = await Speech.transcribe_file_async(wav_path, language="en")
 
 | Error | When | What to do |
 | --- | --- | --- |
-| `ValueError` | A bad `language` (`"Hindi"`, `"EN"`, `""`), `threads` outside 1 to 16 or not an `int`, `beam_size` outside 1 to 8, `max_seconds` outside 1 to 120, an empty model path. | Use whisper's lower-case codes and the ranges in [Language, translate and prompts](#language-translate-and-prompts). |
+| `ValueError` | A bad `language` (`"Hindi"`, `"EN"`, `""`), `threads` outside 1 to 16 or not an `int`, `beam_size` outside 1 to 8, `audio_ctx` not `None`, `"fit"` or 64 to 1500, `max_seconds` outside 1 to 120, an empty model path. | Use whisper's lower-case codes and the ranges in [Language, translate and prompts](#language-translate-and-prompts). |
 | `RuntimeError` | No model file at the path, a damaged file, not enough free memory, no model loaded, no microphone permission, already recording, `stop_async` while not recording, a language the model does not know, a non-English language with an `.en` model, `"cancelled"`, asking for the permission without a screen. | Show the message; it says what is missing. For memory, load a smaller model. |
 | `NotSupportedError` (from `pyxpo.module_api`) | Any call other than `status_async`, `unload_model_async` and `cancel_async` on iOS, the web or the desktop. | Check `status["supported"]` first. |
 | `ModuleNotLinkedError` (from `pyxpo.module_api`) | An Android app built without the module. | Add `"speech"` to `[tool.pyxpo] modules` and rebuild. |
@@ -537,9 +539,26 @@ Models are 30 MB to 1.5 GB, and apps need different ones (English only, or many 
 package stays small, and you decide how and when to download, with the user's consent.
 
 **How fast is it?**
-It depends on the phone and the model. On a recent mid-range phone, `ggml-base-q5_1` usually transcribes faster
-than real time. The numbers in the pictures come from an emulator on a busy computer and are slower than a phone.
+It depends on the phone and the model. On a Galaxy S23 with the default 30-second window:
+
+| Clip | `ggml-base-q5_1` | `ggml-small-q5_1` |
+| --- | --- | --- |
+| 11 s English | 1.5 s | 6.3 s |
+| 5 s Hinglish (Roman) | 1.5 s | 6.6 s |
+| 4 s Hindi (Devanagari) | 5.5 s, wrong text | 7.0 s, close |
+
+Whisper encodes a 30-second window, so a short clip costs almost as much as a long one. `audio_ctx="fit"`
+encodes only the clip: on the S23 it wrote the same clips in 0.6 to 2.3 s, but it dropped words, punctuation,
+or once all but one word, and when the text came out unsure whisper decoded again and took longer (12.8 s for
+the Hindi clip). Keep the default for typing, and measure `"fit"` with your own model and languages before
+using it. The numbers in the pictures come from an emulator on a busy computer and are slower than a phone.
 Use `decode_ms / audio_ms` to measure your own.
+
+**Which CPU build does it use?**
+The end of `system` (returned by `load_model_async`) names it, for example
+`BACKEND = libpyxpo_speech_ggml_cpu_android_armv8.6_1.so` on a Galaxy S23. ggml checks the CPU's features and skips
+builds the phone cannot run. On a 64-bit ARM or x86_64 phone the app carries one build per CPU generation (about
+8 MB of native code per ABI in all); 32-bit ARM gets one plain build.
 
 **Can it stream text while I talk?**
 Not in this version. It transcribes when recording stops. A 30-second limit keeps the wait short.
@@ -565,9 +584,9 @@ whisper.cpp runs on iOS too; the iOS side of this module is planned. Until then,
 | `load_model_async(path, *, check_memory=True, flash_attention=True) -> dict` | Loads a whisper.cpp ggml file. Returns the status plus `load_ms` and `system`. |
 | `unload_model_async() -> None` | Frees the model. Does nothing off Android. |
 | `start_async(*, max_seconds=30, levels=False) -> None` | Starts recording into memory. |
-| `stop_async(*, language="auto", translate=False, prompt=None, threads=None, beam_size=None) -> dict` | Stops and transcribes. Returns `{"text", "language", "segments", "no_speech", "audio_ms", "decode_ms"}`. |
+| `stop_async(*, language="auto", translate=False, prompt=None, threads=None, beam_size=None, audio_ctx=None) -> dict` | Stops and transcribes. Returns `{"text", "language", "segments", "no_speech", "audio_ms", "decode_ms"}`. |
 | `cancel_async() -> None` | Drops the recording, or stops a transcription. Does nothing off Android. |
-| `transcribe_file_async(path, *, language="auto", translate=False, prompt=None, threads=None, beam_size=None) -> dict` | Transcribes a WAV file; returns the same as `stop_async`. |
+| `transcribe_file_async(path, *, language="auto", translate=False, prompt=None, threads=None, beam_size=None, audio_ctx=None) -> dict` | Transcribes a WAV file; returns the same as `stop_async`. |
 | `add_state_listener(fn) -> remove` | `fn(state)`, one of `STATES`. |
 | `add_level_listener(fn) -> remove` | `fn(level)`, 0 to 1, while recording with `levels=True`. |
 | `statusAsync`, `getPermissionAsync`, `requestPermissionAsync`, `memoryAsync`, `loadModelAsync`, `unloadModelAsync`, `startAsync`, `stopAsync`, `cancelAsync`, `transcribeFileAsync`, `addStateListener`, `addLevelListener` | Expo-style names for the functions above. |

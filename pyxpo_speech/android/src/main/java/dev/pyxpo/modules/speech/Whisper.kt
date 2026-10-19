@@ -8,10 +8,11 @@ internal class Whisper private constructor(private var handle: Long) {
 
     val multilingual: Boolean get() = nativeIsMultilingual(handle)
 
-    /** 16 kHz mono samples in [-1, 1]. Null when [abort] stopped it. */
+    /** 16 kHz mono samples in [-1, 1]. Null when [abort] stopped it. [audioCtx]: 0 whisper's 30 s window,
+     *  -1 sized to the samples, or that many 20 ms encoder steps. */
     fun transcribe(samples: FloatArray, language: String, translate: Boolean, prompt: String?, threads: Int,
-                   beam: Int): Result? {
-        val raw = nativeTranscribe(handle, samples, language, translate, prompt, threads, beam) ?: return null
+                   beam: Int, audioCtx: Int): Result? {
+        val raw = nativeTranscribe(handle, samples, language, translate, prompt, threads, beam, audioCtx) ?: return null
         // language \0 no-speech \0 segment \0 segment ...; a cut-off character decodes as U+FFFD
         val parts = String(raw, Charsets.UTF_8).split('\u0000')
         return Result(parts[0], parts.getOrNull(1)?.toFloatOrNull() ?: 0f, parts.drop(2))
@@ -43,6 +44,6 @@ internal class Whisper private constructor(private var handle: Long) {
         @JvmStatic private external fun nativeSystemInfo(): String
         @JvmStatic private external fun nativeTranscribe(handle: Long, samples: FloatArray, language: String,
                                                          translate: Boolean, prompt: String?, threads: Int,
-                                                         beam: Int): ByteArray?
+                                                         beam: Int, audioCtx: Int): ByteArray?
     }
 }
