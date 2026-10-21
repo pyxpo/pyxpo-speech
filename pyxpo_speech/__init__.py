@@ -1,4 +1,4 @@
-"""Offline speech to text for pyxpo apps: the microphone and whisper.cpp, on the phone.
+"""Offline speech to text for pyxpo apps: the microphone and whisper.cpp, or the phone's own on-device recognizer.
 
     import pyxpo_speech as Speech
 
@@ -31,6 +31,7 @@ STATES = ("recording", "transcribing", "idle", "limit")
 PathLike = Union[str, "os.PathLike[str]"]
 
 _LANG = re.compile(r"^(auto|[a-z]{2,3})$")
+_LOCALE = re.compile(r"^[a-z]{2,3}(-[A-Za-z0-9]{2,8})*$")
 
 
 def _native() -> bool:
@@ -147,7 +148,7 @@ def _transcript(r: Dict[str, Any]) -> Dict[str, Any]:
 
 async def stop_async(*, language: str = "auto", translate: bool = False, prompt: Optional[str] = None,
                      threads: Optional[int] = None, beam_size: Optional[int] = None,
-                     audio_ctx: Union[None, int, str] = None) -> Dict[str, Any]:
+                     audio_ctx: Union[None, int, str] = None, keep_audio: bool = False) -> Dict[str, Any]:
     """Stops recording and transcribes it. Returns `text`, `language` (detected, or the one given), `segments`,
     `no_speech` (0..1; high means it was likely silence), `audio_ms` and `decode_ms`.
 
@@ -157,14 +158,37 @@ async def stop_async(*, language: str = "auto", translate: bool = False, prompt:
 
     `audio_ctx`: whisper encodes a 30-second window (1500 steps of 20 ms) whatever the clip's length. `"fit"`
     encodes only as much as was recorded, which makes short clips several times faster; check its accuracy for
-    your model and languages. An int sets the window (64 to 1500)."""
+    your model and languages. An int sets the window (64 to 1500).
+
+    `keep_audio=True` keeps the recording in memory so `transcribe_kept_async` can write it again, for example
+    in Hindi and then in English. It is cleared by `forget_audio_async`, the next `start_async`, `cancel_async`,
+    `unload_model_async`, or two minutes after stopping, whichever comes first."""
     _need_native("stop_async")
     o = _options(language, translate, prompt, threads, beam_size, audio_ctx)
+    if keep_audio:
+        o["keepAudio"] = True
     return _transcript(await call("Speech", "stop", o, reply=True))
 
 
+async def transcribe_kept_async(*, language: str = "auto", translate: bool = False, prompt: Optional[str] = None,
+                                threads: Optional[int] = None, beam_size: Optional[int] = None,
+                                audio_ctx: Union[None, int, str] = None) -> Dict[str, Any]:
+    """Transcribes the recording kept by `stop_async(keep_audio=True)` again, with other options (`translate=True`
+    for English). Raises `RuntimeError` when nothing is kept. The recording stays kept."""
+    _need_native("transcribe_kept_async")
+    o = _options(language, translate, prompt, threads, beam_size, audio_ctx)
+    return _transcript(await call("Speech", "transcribeKept", o, reply=True))
+
+
+async def forget_audio_async() -> None:
+    """Clears a kept recording from memory now."""
+    if _native():
+        await call("Speech", "forgetAudio", reply=True)
+
+
 async def cancel_async() -> None:
-    """Stops recording without transcribing, or stops a running transcription (its call raises "cancelled")."""
+    """Stops recording (whisper's or live) without text, or stops a running transcription (its call raises
+    "cancelled"). Also clears a kept recording."""
     if _native():
         await call("Speech", "cancel", reply=True)
 
@@ -179,6 +203,55 @@ async def transcribe_file_async(path: PathLike, *, language: str = "auto", trans
     return _transcript(await call("Speech", "transcribeFile", os.fspath(path), o, reply=True))
 
 
+# live: the phone's own on-device recognizer
+
+def _locale(language: str) -> str:
+    if not isinstance(language, str) or not _LOCALE.match(language):
+        raise ValueError("language must be a BCP 47 tag like 'hi-IN' or 'en-US', not %r" % (language,))
+    return language
+
+
+async def live_status_async(language: str = "en-US") -> Dict[str, Any]:
+    """Whether the phone's on-device recognizer can listen in `language` (a tag like "hi-IN").
+
+    `available` is False without one (Android 11 and older, or none installed). On Android 13+ it also has
+    `ready` (the language is on the phone), and the `installed`, `pending` (downloading), `downloadable` and
+    `online` language lists. On Android 12 only `available` is known: try `start_live_async`."""
+    if not _native():
+        return {"available": False}
+    return await call("Speech", "liveStatus", _locale(language), reply=True)
+
+
+async def download_live_language_async(language: str) -> None:
+    """Asks the on-device recognizer to download `language` (Android 13+). The phone downloads it in the
+    background and may show a notification; poll `live_status_async` for `ready`."""
+    _need_native("download_live_language_async")
+    await call("Speech", "liveDownload", _locale(language), reply=True)
+
+
+async def start_live_async(language: str = "en-US", *, max_seconds: float = 30, levels: bool = False) -> None:
+    """Starts listening with the phone's on-device recognizer: no model to load, words arrive while the person
+    speaks (`add_partial_listener`), and it writes languages like Hindi in their own script. It never uses the
+    network (Android's `createOnDeviceSpeechRecognizer`); it raises `RuntimeError` when the phone has none or
+    lacks the language. Pauses do not end it: it listens until `stop_live_async`, `cancel_async` or
+    `max_seconds` (1 to 120; the state listeners get `limit`). `levels=True` sends the loudness like
+    `start_async`. Whisper's recording and this one cannot run at once."""
+    _need_native("start_live_async")
+    if not 1 <= max_seconds <= 120:
+        raise ValueError("max_seconds must be 1 to 120")
+    await call("Speech", "liveStart", {"language": _locale(language), "maxSeconds": float(max_seconds),
+                                       "levels": bool(levels)}, reply=True)
+
+
+async def stop_live_async() -> Dict[str, Any]:
+    """Stops listening and returns `text` (everything heard, empty for silence), `language`, `audio_ms` and
+    `decode_ms` (the wait for the last words)."""
+    _need_native("stop_live_async")
+    r = await call("Speech", "liveStop", reply=True)
+    return {"text": r.get("text", ""), "language": r.get("language", ""), "audio_ms": int(r.get("audioMs", 0)),
+            "decode_ms": int(r.get("decodeMs", 0))}
+
+
 # events
 
 def add_state_listener(listener: Callable[[str], Any]) -> Callable[[], None]:
@@ -191,6 +264,11 @@ def add_level_listener(listener: Callable[[float], Any]) -> Callable[[], None]:
     return on_event("Speech.level", lambda d: listener(float((d or {}).get("level", 0.0))))
 
 
+def add_partial_listener(listener: Callable[[str], Any]) -> Callable[[], None]:
+    """Calls `listener(text)` with everything heard so far while `start_live_async` listens."""
+    return on_event("Speech.partial", lambda d: listener(str((d or {}).get("text", ""))))
+
+
 statusAsync = status_async
 getPermissionAsync = get_permission_async
 requestPermissionAsync = request_permission_async
@@ -201,13 +279,23 @@ startAsync = start_async
 stopAsync = stop_async
 cancelAsync = cancel_async
 transcribeFileAsync = transcribe_file_async
+transcribeKeptAsync = transcribe_kept_async
+forgetAudioAsync = forget_audio_async
 addStateListener = add_state_listener
 addLevelListener = add_level_listener
+liveStatusAsync = live_status_async
+downloadLiveLanguageAsync = download_live_language_async
+startLiveAsync = start_live_async
+stopLiveAsync = stop_live_async
+addPartialListener = add_partial_listener
 
 __all__ = [
     "STATES", "status_async", "get_permission_async", "request_permission_async", "memory_async",
     "load_model_async", "unload_model_async", "start_async", "stop_async", "cancel_async", "transcribe_file_async",
+    "transcribe_kept_async", "forget_audio_async", "transcribeKeptAsync", "forgetAudioAsync",
     "add_state_listener", "add_level_listener", "statusAsync", "getPermissionAsync", "requestPermissionAsync",
     "memoryAsync", "loadModelAsync", "unloadModelAsync", "startAsync", "stopAsync", "cancelAsync",
-    "transcribeFileAsync", "addStateListener", "addLevelListener",
+    "transcribeFileAsync", "addStateListener", "addLevelListener", "live_status_async",
+    "download_live_language_async", "start_live_async", "stop_live_async", "add_partial_listener",
+    "liveStatusAsync", "downloadLiveLanguageAsync", "startLiveAsync", "stopLiveAsync", "addPartialListener",
 ]

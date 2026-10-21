@@ -37,6 +37,9 @@ if (await Speech.request_permission_async())["granted"]:
   - Language detection, or a fixed language such as `"en"` or `"hi"`.
   - `translate=True` writes English from other languages.
   - A `prompt` steers spelling and style, for example Hinglish written in Roman letters.
+- **Live words while speaking (Android 12+):** `start_live_async` uses the phone's own on-device recognizer
+  (`createOnDeviceSpeechRecognizer`, never the network). Words arrive while the person speaks, and Hindi comes out
+  in Devanagari. No whisper model needed. See [Live recognition](#live-recognition).
 - **Memory-aware:** `memory_async` reports the phone's free memory, and `load_model_async` refuses a model that
   would push the phone into its low-memory zone (where Android kills apps).
 - **Headless:** works while the app's Python runs without a screen, for example behind a keyboard toolbar button
@@ -51,6 +54,7 @@ if (await Speech.request_permission_async())["granted"]:
 | Choosing and shipping a model | [Models](#models) |
 | Recording the microphone | [Microphone permission](#microphone-permission) · [Recording](#recording) |
 | Getting better text for your language | [Language, translate and prompts](#language-translate-and-prompts) |
+| Showing words while the person speaks | [Live recognition](#live-recognition) |
 | Transcribing a saved WAV file | [Transcribing files](#transcribing-files) |
 | Adding voice typing to a keyboard | [Recipe: voice typing in a keyboard](#recipe-voice-typing-in-a-keyboard) |
 | Shipping to the stores | [Production checklist](#production-checklist) |
@@ -219,9 +223,24 @@ print(t["text"], t["no_speech"], t["audio_ms"], t["decode_ms"])
 | `start_async(max_seconds=30, levels=False)` | Starts recording into memory. `max_seconds` is 1 to 120. Raises `RuntimeError` when already recording or the permission is missing. |
 | `stop_async(language="auto", ...)` | Stops recording and transcribes it. Takes the [options below](#language-translate-and-prompts). |
 | `cancel_async()` | Stops recording without transcribing (the audio is cleared), or stops a running transcription, whose call then raises `RuntimeError("cancelled")`. |
+| `stop_async(..., keep_audio=True)` | Also keeps the recording in memory so it can be written again. |
+| `transcribe_kept_async(language="auto", ...)` | Transcribes the kept recording again with other options, for example `translate=True` for English after a Hindi pass. Raises `RuntimeError` when nothing is kept. |
+| `forget_audio_async()` | Clears the kept recording now. |
 
 When recording reaches `max_seconds` it stops by itself and the state listeners get `"limit"`. Call `stop_async`
 then to get the text. Under a quarter of a second of audio returns empty text without running whisper.
+
+**One recording, two texts.** Keep the audio to show what was said and an English version without asking the
+user to speak twice:
+
+```python
+said = await Speech.stop_async(language="hi", keep_audio=True)
+english = await Speech.transcribe_kept_async(language="hi", translate=True)
+await Speech.forget_audio_async()
+```
+
+A kept recording lives only in memory and is zeroed by `forget_audio_async`, the next `start_async`,
+`cancel_async`, `unload_model_async`, or two minutes after stopping, whichever comes first.
 
 `stop_async` and `transcribe_file_async` return:
 
@@ -277,6 +296,46 @@ t = await Speech.stop_async(language="en", prompt=HINGLISH)
 "Thank you." for silence, and with a short or quiet recording it can repeat your prompt. Drop those, and treat a
 high `no_speech` as nothing heard. The [recipe](#recipe-voice-typing-in-a-keyboard) does this.
 
+## Live recognition
+
+Android 12 and later can carry an on-device speech recognizer (on most phones it comes with Google's
+"Speech Recognition & Synthesis" or Android System Intelligence). `start_live_async` uses it through
+`SpeechRecognizer.createOnDeviceSpeechRecognizer`, which never sends audio to a server. Words arrive while the
+person speaks, which whisper cannot do, and Hindi is written in Devanagari.
+
+```python
+from pyxpo_speech import Speech
+
+
+async def listen_hindi(show):
+    s = await Speech.live_status_async("hi-IN")
+    if not s["available"]:
+        return None                                  # no on-device recognizer: use whisper instead
+    if not s.get("ready", True):
+        await Speech.download_live_language_async("hi-IN")   # the phone shows the download
+        return None
+    remove = Speech.add_partial_listener(show)       # show(text): everything heard so far
+    await Speech.start_live_async("hi-IN", max_seconds=30, levels=True)
+    return remove
+
+
+async def finish():
+    r = await Speech.stop_live_async()
+    return r["text"]                                 # "मैं कल ऑफिस आऊँगा"
+```
+
+- `language` is a locale such as `"hi-IN"`, `"en-IN"` or `"en-US"` (not whisper's `"hi"`).
+- The recognizer ends its session at a pause. The module starts a new one until `stop_live_async`, so one
+  recording can hold several sentences. `max_seconds` ends it (the state listener hears `"limit"`).
+- `live_status_async(language)` returns `{"available": False}` without a recognizer. On Android 13+ it also returns
+  `installed`, `pending`, `downloadable` and `online` language lists, and `ready` (the language is installed).
+  On Android 12 it returns only `available`.
+- `download_live_language_async` asks the recognizer to download a language (Android 13+). The phone shows its own
+  progress; call `live_status_async` again later.
+- The recognizer keeps no audio, so `translate` and `transcribe_kept_async` do not apply. For English, send the
+  text to a language model.
+- Nothing is logged. `cancel_async` stops listening and drops the text.
+
 ## Transcribing files
 
 ```python
@@ -292,8 +351,8 @@ t = await Speech.transcribe_file_async(wav_path, language="en")
 
 | Error | When | What to do |
 | --- | --- | --- |
-| `ValueError` | A bad `language` (`"Hindi"`, `"EN"`, `""`), `threads` outside 1 to 16 or not an `int`, `beam_size` outside 1 to 8, `audio_ctx` not `None`, `"fit"` or 64 to 1500, `max_seconds` outside 1 to 120, an empty model path. | Use whisper's lower-case codes and the ranges in [Language, translate and prompts](#language-translate-and-prompts). |
-| `RuntimeError` | No model file at the path, a damaged file, not enough free memory, no model loaded, no microphone permission, already recording, `stop_async` while not recording, a language the model does not know, a non-English language with an `.en` model, `"cancelled"`, asking for the permission without a screen. | Show the message; it says what is missing. For memory, load a smaller model. |
+| `ValueError` | A bad `language` (`"Hindi"`, `"EN"`, `""`), `threads` outside 1 to 16 or not an `int`, `beam_size` outside 1 to 8, `audio_ctx` not `None`, `"fit"` or 64 to 1500, `max_seconds` outside 1 to 120, an empty model path, a live `language` that is not a locale (`"Hindi"`, `"hi_IN"`). | Use whisper's lower-case codes and the ranges in [Language, translate and prompts](#language-translate-and-prompts). |
+| `RuntimeError` | No model file at the path, a damaged file, not enough free memory, no model loaded, no microphone permission, already recording, `stop_async` while not recording, a language the model does not know, a non-English language with an `.en` model, `"cancelled"`, live recognition without a recognizer, or a language the phone has not downloaded ("download it first"), asking for the permission without a screen. | Show the message; it says what is missing. For memory, load a smaller model. |
 | `NotSupportedError` (from `pyxpo.module_api`) | Any call other than `status_async`, `unload_model_async` and `cancel_async` on iOS, the web or the desktop. | Check `status["supported"]` first. |
 | `ModuleNotLinkedError` (from `pyxpo.module_api`) | An Android app built without the module. | Add `"speech"` to `[tool.pyxpo] modules` and rebuild. |
 
@@ -584,12 +643,19 @@ whisper.cpp runs on iOS too; the iOS side of this module is planned. Until then,
 | `load_model_async(path, *, check_memory=True, flash_attention=True) -> dict` | Loads a whisper.cpp ggml file. Returns the status plus `load_ms` and `system`. |
 | `unload_model_async() -> None` | Frees the model. Does nothing off Android. |
 | `start_async(*, max_seconds=30, levels=False) -> None` | Starts recording into memory. |
-| `stop_async(*, language="auto", translate=False, prompt=None, threads=None, beam_size=None, audio_ctx=None) -> dict` | Stops and transcribes. Returns `{"text", "language", "segments", "no_speech", "audio_ms", "decode_ms"}`. |
+| `stop_async(*, language="auto", translate=False, prompt=None, threads=None, beam_size=None, audio_ctx=None, keep_audio=False) -> dict` | Stops and transcribes. Returns `{"text", "language", "segments", "no_speech", "audio_ms", "decode_ms"}`. |
 | `cancel_async() -> None` | Drops the recording, or stops a transcription. Does nothing off Android. |
+| `transcribe_kept_async(*, language="auto", translate=False, prompt=None, threads=None, beam_size=None, audio_ctx=None) -> dict` | Transcribes the recording kept by `stop_async(keep_audio=True)`; returns the same as `stop_async`. |
+| `forget_audio_async() -> None` | Clears a kept recording. Does nothing off Android. |
 | `transcribe_file_async(path, *, language="auto", translate=False, prompt=None, threads=None, beam_size=None, audio_ctx=None) -> dict` | Transcribes a WAV file; returns the same as `stop_async`. |
+| `live_status_async(language="en-US") -> dict` | The on-device recognizer: `{"available"}`, plus `installed`, `pending`, `downloadable`, `online` and `ready` on Android 13+. `{"available": False}` off Android. |
+| `download_live_language_async(language) -> None` | Asks the recognizer to download a language (Android 13+). |
+| `start_live_async(language="en-US", *, max_seconds=30, levels=False) -> None` | Starts live recognition. Partial text goes to `add_partial_listener`. |
+| `stop_live_async() -> dict` | Stops and returns `{"text", "language", "audio_ms", "decode_ms"}`. |
+| `add_partial_listener(fn) -> remove` | `fn(text)`: everything heard so far, while live recognition runs. |
 | `add_state_listener(fn) -> remove` | `fn(state)`, one of `STATES`. |
 | `add_level_listener(fn) -> remove` | `fn(level)`, 0 to 1, while recording with `levels=True`. |
-| `statusAsync`, `getPermissionAsync`, `requestPermissionAsync`, `memoryAsync`, `loadModelAsync`, `unloadModelAsync`, `startAsync`, `stopAsync`, `cancelAsync`, `transcribeFileAsync`, `addStateListener`, `addLevelListener` | Expo-style names for the functions above. |
+| `statusAsync`, `getPermissionAsync`, `requestPermissionAsync`, `memoryAsync`, `loadModelAsync`, `unloadModelAsync`, `startAsync`, `stopAsync`, `cancelAsync`, `transcribeFileAsync`, `transcribeKeptAsync`, `forgetAudioAsync`, `addStateListener`, `addLevelListener`, `liveStatusAsync`, `downloadLiveLanguageAsync`, `startLiveAsync`, `stopLiveAsync`, `addPartialListener` | Expo-style names for the functions above. |
 
 **Constants**
 

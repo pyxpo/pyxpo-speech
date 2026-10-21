@@ -13,3 +13,8 @@
   listeners. `stop` and `transcribe_file` take `language`, `translate`, `prompt`, `threads`, `beam_size` and
   `audio_ctx` (`"fit"` encodes only the clip: faster, less reliable). Works while the app runs headless, so an input method can use it.
 - iOS, the web and the desktop: `status` reports `supported: False`; the other calls raise `NotSupportedError`.
+- Kept audio: `stop_async(keep_audio=True)`, `transcribe_kept_async` and `forget_audio_async` write one recording
+  twice (for example Hindi, then English). Memory only; cleared by forget, start, cancel, unload, or after two minutes.
+- Live recognition (Android 12+): `start_live_async`, `stop_live_async`, `live_status_async`,
+  `download_live_language_async` and `add_partial_listener` use the phone's on-device recognizer
+  (`createOnDeviceSpeechRecognizer`, no network). Words arrive while speaking; Hindi in Devanagari. No audio kept.

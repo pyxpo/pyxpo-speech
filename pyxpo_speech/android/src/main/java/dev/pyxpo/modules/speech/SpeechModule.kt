@@ -29,7 +29,11 @@ class SpeechModule : PxModule() {
     @Volatile private var model: Whisper? = null
     @Volatile private var modelPath: String? = null
     private var recorder: Recorder? = null
+    private var live: Live? = null   // the phone's on-device recognizer, listening
     private var busy = 0
+    // the last recording, kept on request for another pass (another language, English); worker thread only
+    private var kept: FloatArray? = null
+    private val forgetKept = Runnable { worker.execute { clearKept() } }
 
     override fun call(ctx: PxModuleContext, method: String, args: JSONArray, reply: PxReply) {
         val c = ctx.context
@@ -44,7 +48,13 @@ class SpeechModule : PxModule() {
                 "start" -> start(c, args.optJSONObject(0) ?: JSONObject(), reply)
                 "stop" -> stop(args.optJSONObject(0) ?: JSONObject(), reply)
                 "cancel" -> { cancel(); reply(null, null) }
+                "transcribeKept" -> transcribeKept(args.optJSONObject(0) ?: JSONObject(), reply)
+                "forgetAudio" -> { main.removeCallbacks(forgetKept); worker.execute { clearKept(); reply(null, null) } }
                 "transcribeFile" -> transcribeFile(args.getString(0), args.optJSONObject(1) ?: JSONObject(), reply)
+                "liveStatus" -> Live.support(c, args.optString(0, "en-US")) { m, e -> reply(m, e) }
+                "liveDownload" -> reply(null, Live.download(c, args.getString(0)))
+                "liveStart" -> liveStart(c, args.optJSONObject(0) ?: JSONObject(), reply)
+                "liveStop" -> liveStop(reply)
                 else -> reply(null, "Speech has no method $method")
             }
         } catch (e: Exception) {
@@ -55,7 +65,7 @@ class SpeechModule : PxModule() {
     private fun status(): Map<String, Any?> {
         val m = model
         return mapOf("supported" to true, "loaded" to (m != null), "model" to modelPath,
-                     "multilingual" to (m?.multilingual ?: false), "recording" to (recorder != null),
+                     "multilingual" to (m?.multilingual ?: false), "recording" to (recorder != null || live != null),
                      "transcribing" to (busy > 0))
     }
 
@@ -133,7 +143,9 @@ class SpeechModule : PxModule() {
 
     private fun unload(reply: PxReply) {
         model?.abort()
+        main.removeCallbacks(forgetKept)
         worker.execute {
+            clearKept()
             model?.free(); model = null; modelPath = null
             reply(null, null)
         }
@@ -142,13 +154,15 @@ class SpeechModule : PxModule() {
     // recording
 
     private fun start(c: Context, o: JSONObject, reply: PxReply) {
-        if (recorder != null) return reply(null, "already recording")
+        if (recorder != null || live != null) return reply(null, "already recording")
         if (!granted(c)) return reply(null, "the microphone permission is not granted: call request_permission_async first")
         val max = o.optDouble("maxSeconds", 30.0).coerceIn(1.0, 120.0)
         val levels = o.optBoolean("levels", false)
         val r = Recorder(max, if (levels) { l -> PxProcess.emit(LEVEL, mapOf("level" to l.toDouble())) } else null) {
             main.post { if (recorder != null) state("limit") }
         }
+        main.removeCallbacks(forgetKept)
+        worker.execute { clearKept() }   // a new recording replaces the kept one
         r.start()
         recorder = r
         state("recording")
@@ -160,14 +174,38 @@ class SpeechModule : PxModule() {
         recorder = null
         busy++
         state("transcribing")
+        val keep = o.optBoolean("keepAudio", false)
+        if (keep) main.postDelayed(forgetKept, KEEP_MS)
         worker.execute {
             val audio = r.stop()
+            if (keep) { clearKept(); kept = audio.copyOf() }
             transcribe(audio, o, reply)
         }
     }
 
+    private fun transcribeKept(o: JSONObject, reply: PxReply) {
+        if (recorder != null) return reply(null, "recording: call stop_async first")
+        busy++
+        state("transcribing")
+        worker.execute {
+            val k = kept ?: run {
+                done(); return@execute reply(null, "no kept recording: call stop_async(keep_audio=True) first")
+            }
+            transcribe(k.copyOf(), o, reply)
+        }
+    }
+
+    /** Worker thread. */
+    private fun clearKept() {
+        kept?.fill(0f)
+        kept = null
+    }
+
     private fun cancel() {
+        live?.let { l -> live = null; l.cancel() }
         recorder?.let { r -> recorder = null; worker.execute { r.stop().fill(0f) } }
+        main.removeCallbacks(forgetKept)
+        worker.execute { clearKept() }
         model?.abort()
         if (busy == 0) state("idle")
     }
@@ -217,7 +255,47 @@ class SpeechModule : PxModule() {
         }
     }
 
-    private fun done() = main.post { busy--; if (busy == 0 && recorder == null) state("idle") }
+    private fun done() = main.post { busy--; if (busy == 0 && recorder == null && live == null) state("idle") }
+
+    // live: the phone's on-device recognizer (see Live)
+
+    private fun liveStart(c: Context, o: JSONObject, reply: PxReply) {
+        if (recorder != null || live != null) return reply(null, "already recording")
+        if (!granted(c)) return reply(null, "the microphone permission is not granted: call request_permission_async first")
+        val language = o.optString("language", "en-US")
+        val levels = o.optBoolean("levels", false)
+        var l: Live? = null
+        l = Live(c, language, o.optDouble("maxSeconds", 30.0).coerceIn(1.0, 120.0),
+                 onPartial = { t -> if (live === l) PxProcess.emit(PARTIAL, mapOf("text" to t)) },
+                 onLevel = if (levels) { v -> if (live === l) PxProcess.emit(LEVEL, mapOf("level" to v.toDouble())) } else null,
+                 onLimit = { if (live === l) state("limit") })
+        live = l
+        main.removeCallbacks(forgetKept)
+        worker.execute { clearKept() }
+        l.start { e ->
+            if (e != null) {
+                if (live === l) live = null
+                reply(null, e)
+            } else {
+                if (live === l) state("recording")
+                reply(null, null)
+            }
+        }
+    }
+
+    private fun liveStop(reply: PxReply) {
+        val l = live ?: return reply(null, "not listening: call start_live_async first")
+        state("transcribing")
+        val began = SystemClock.elapsedRealtime()
+        val heard = l.audioMs
+        l.stop { text, error ->
+            if (live === l) live = null
+            if (busy == 0 && recorder == null && live == null) state("idle")
+            if (error != null) reply(null, error)
+            else reply(mapOf("text" to (text ?: "").trim().replace(Regex("\\s+"), " "), "language" to l.language,
+                             "audioMs" to heard, "decodeMs" to (SystemClock.elapsedRealtime() - began)), null)
+        }
+    }
 
     private fun result(text: String, language: String, noSpeech: Float, segments: List<String>, audioMs: Long,
                        ms: Long) = mapOf("text" to text, "language" to language, "noSpeech" to noSpeech.toDouble(),
@@ -230,7 +308,9 @@ class SpeechModule : PxModule() {
     companion object {
         private const val MIC = Manifest.permission.RECORD_AUDIO
         private const val MB = 1024L * 1024L
+        private const val KEEP_MS = 120_000L   // a kept recording is cleared after two minutes at most
         const val STATE = "Speech.state"
         const val LEVEL = "Speech.level"
+        const val PARTIAL = "Speech.partial"
     }
 }
