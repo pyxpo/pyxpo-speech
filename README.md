@@ -500,7 +500,7 @@ Speech.add_state_listener(on_state)
 ```
 
 Import this module from your root layout so the listeners are registered when the keyboard starts your Python, and
-call `toolbar(False)` once when the app opens (for example `use_async(lambda: toolbar(False), [])`). The keyboard
+call `toolbar(False)` once when the app opens (for example pass `use_async(..., [])` an `async def` that awaits `toolbar(False)`). The keyboard
 shows no toolbar buttons in private fields (passwords, PINs, incognito tabs) and does not type app text there, so
 voice typing never runs in them.
 
