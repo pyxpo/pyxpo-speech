@@ -6,7 +6,7 @@ cloud service, no API key and no network call. Audio is never written to a file,
 text is ready. It works from an app screen, and also from an Android keyboard or another service with no screen.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/pyxpo/pyxpo/main/packages/speech/docs/images/hero.png" width="820" alt="The AI Keyboard voice check on the Android emulator: Hinglish and English recordings turned into text on the phone, and the keyboard listening after its microphone button was tapped">
+  <img src="https://raw.githubusercontent.com/pyxpo/pyxpo-speech/main/docs/images/hero.png" width="820" alt="The AI Keyboard voice check on the Android emulator: Hinglish and English recordings turned into text on the phone, and the keyboard listening after its microphone button was tapped">
 </p>
 
 ```python
@@ -371,7 +371,7 @@ on Android." there.
 ## Recipe: voice typing in a keyboard
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/pyxpo/pyxpo/main/packages/speech/docs/images/keyboard.png" width="560" alt="The AI Keyboard on the Android emulator: listening after its microphone button was tapped, then saying nothing was heard after a silent recording">
+  <img src="https://raw.githubusercontent.com/pyxpo/pyxpo-speech/main/docs/images/keyboard.png" width="560" alt="The AI Keyboard on the Android emulator: listening after its microphone button was tapped, then saying nothing was heard after a silent recording">
 </p>
 
 This is how the AI Keyboard app (in the pictures) adds a 🎤 button to its
