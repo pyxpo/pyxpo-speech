@@ -2,6 +2,8 @@
 
 ## 0.1.0a1 (unreleased)
 
+- Moved to its own repository, github.com/pyxpo/pyxpo-speech, with CI on Python 3.9 and 3.12 and releases from tags.
+- Added a security policy, a contributing guide and issue templates.
 - First release. Android: offline speech to text with whisper.cpp 1.9.5 (pinned source, sha256-checked,
   built with the app). ggml is built as shared libraries with one CPU backend per instruction set level on
   arm64 and x86_64; the fastest one the phone's CPU runs is loaded at start (1.6x faster than a generic armv8.0
