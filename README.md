@@ -1,5 +1,7 @@
 # pyxpo-speech
 
+[![CI](https://github.com/pyxpo/pyxpo-speech/actions/workflows/ci.yml/badge.svg)](https://github.com/pyxpo/pyxpo-speech/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
 Offline speech to text for [pyxpo](https://github.com/pyxpo/pyxpo) apps. The microphone is recorded into memory,
 then [whisper.cpp](https://github.com/ggml-org/whisper.cpp) turns it into text on the phone's CPU. There is no
 cloud service, no API key and no network call. Audio is never written to a file, and it is cleared as soon as the
