@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0a1 (unreleased)
+## 0.1.0a1 (2026-10-29)
 
 - Moved to its own repository, github.com/pyxpo/pyxpo-speech, with CI on Python 3.9 and 3.12 and releases from tags.
 - Added a security policy, a contributing guide and issue templates.

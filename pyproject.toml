@@ -27,7 +27,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 requires-python = ">=3.9"
-dependencies = ["pyxpo>=0.1.0a2,<0.2"]
+dependencies = ["pyxpo>=0.1.0a6,<0.2"]
 
 [project.urls]
 Homepage = "https://github.com/pyxpo/pyxpo-speech"
